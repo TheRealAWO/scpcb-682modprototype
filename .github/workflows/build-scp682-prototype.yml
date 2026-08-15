@@ -9,14 +9,14 @@ on:
       - '**.bb'
       - '**.decls'
       - '**.dll'
-      - 'mavless_bin.zip'
       - 'tools/patch_682_source.ps1'
       - '.github/workflows/build-scp682-prototype.yml'
 
 jobs:
   build:
-    runs-on: windows-latest
-    timeout-minutes: 30
+    # Blitz Research documents Visual Studio 2022 for the current open-source tree.
+    runs-on: windows-2022
+    timeout-minutes: 45
 
     steps:
       - name: Checkout fork
@@ -27,31 +27,44 @@ jobs:
         run: |
           ./tools/patch_682_source.ps1
 
-      - name: Prepare Containment Breach Blitz3D toolchain
+      - name: Build current open-source Blitz3D compiler
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $tool = Join-Path $env:RUNNER_TEMP 'scpcb-blitz3d'
-          New-Item -ItemType Directory -Path $tool -Force | Out-Null
-          Expand-Archive -Path './mavless_bin.zip' -DestinationPath $tool -Force
+          $src = Join-Path $env:RUNNER_TEMP 'blitz3d_soloud'
+          $build = Join-Path $src 'cmake-build-release'
 
-          $cc = Get-ChildItem -Path $tool -Recurse -Filter 'blitzcc.exe' | Select-Object -First 1
-          if (-not $cc) { throw 'mavless_bin.zip did not contain blitzcc.exe' }
+          git clone --depth 1 https://github.com/blitz-research/blitz3d_soloud.git $src
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $binDir = $cc.Directory.FullName
-          $blitzRoot = Split-Path $binDir -Parent
+          cmake -S $src -B $build -A Win32 -G "Visual Studio 17 2022"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cmake --build $build --config Release --parallel 2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $blitzRoot = Join-Path $src 'BLITZ3D_INSTALL'
+          $cc = Join-Path $blitzRoot 'bin\blitzcc.exe'
+          if (-not (Test-Path $cc)) {
+            $found = Get-ChildItem -Path $src -Recurse -Filter 'blitzcc.exe' | Select-Object -First 1
+            if (-not $found) { throw 'Open-source Blitz3D build did not produce blitzcc.exe' }
+            $cc = $found.FullName
+            $blitzRoot = Split-Path (Split-Path $cc -Parent) -Parent
+          }
+
           $userlibs = Join-Path $blitzRoot 'userlibs'
           New-Item -ItemType Directory -Path $userlibs -Force | Out-Null
 
+          # CB's external APIs are discovered by blitzcc from userlibs.
           Get-ChildItem -Path . -File -Filter '*.decls' | Copy-Item -Destination $userlibs -Force
           Get-ChildItem -Path . -File -Filter '*.dll'   | Copy-Item -Destination $userlibs -Force
 
-          "BLITZCC=$($cc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BLITZCC=$cc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BLITZPATH=$blitzRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          Write-Host "blitzcc: $($cc.FullName)"
+          Write-Host "blitzcc: $cc"
           Write-Host "blitzpath: $blitzRoot"
-          Get-ChildItem -Path $binDir | Format-Table Name,Length
+          Get-ChildItem (Join-Path $blitzRoot 'bin') | Format-Table Name,Length
 
       - name: Compiler version
         shell: powershell
