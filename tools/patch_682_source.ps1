@@ -2,19 +2,33 @@ $ErrorActionPreference = 'Stop'
 
 $mainPath = Join-Path $PSScriptRoot '..\Main.bb'
 $mainPath = [System.IO.Path]::GetFullPath($mainPath)
-$text = [System.IO.File]::ReadAllText($mainPath)
+
+function Get-MainText {
+    return [System.IO.File]::ReadAllText($mainPath)
+}
 
 function Replace-Once([string]$needle, [string]$replacement, [string]$description) {
-    $script:text = [System.IO.File]::ReadAllText($mainPath)
-    $count = ([regex]::Matches($script:text, [regex]::Escape($needle))).Count
+    $text = Get-MainText
+    $count = ([regex]::Matches($text, [regex]::Escape($needle))).Count
     if ($count -ne 1) {
         throw "Expected exactly one match for $description, found $count"
     }
-    $script:text = $script:text.Replace($needle, $replacement)
-    [System.IO.File]::WriteAllText($mainPath, $script:text, [System.Text.Encoding]::Default)
+    $text = $text.Replace($needle, $replacement)
+    [System.IO.File]::WriteAllText($mainPath, $text, [System.Text.Encoding]::Default)
 }
 
-# Integrate only after CB has declared Rooms, Doors, NPCs, events, UI globals, etc.
+# The current open-source Blitz3D runtime does not expose three visual-only
+# fixed-function bump-environment helpers used by CB's historical mavless build.
+# Define compatibility shims before MapSystem.bb is parsed.
+$mapAnchor = 'Include "MapSystem.bb"'
+$mapBlock = @"
+Include "SCP682Compat.bb"
+Include "MapSystem.bb"
+"@
+Replace-Once $mapAnchor $mapBlock 'modern Blitz3D compatibility include'
+
+# Integrate the 682 player layer only after CB has declared Rooms, Doors, NPCs,
+# events, UI globals, etc.
 $includeAnchor = "Global I_Zone.MapZones = New MapZones"
 $includeBlock = @"
 Include "SCP682Player.bb"
@@ -33,17 +47,18 @@ $updateBlock = @"
 Replace-Once $updateAnchor $updateBlock 'per-frame SCP-682 hook'
 
 # The prototype is a post-breach creature run, not D-9341's escort/173 intro.
+$text = Get-MainText
 $introAnchor = "Function InitNewGame()`r`n`tCatchErrors(""Uncaught (InitNewGame)"")"
+$newline = "`r`n"
 if (-not $text.Contains($introAnchor)) {
-    # tolerate LF checkouts
     $introAnchor = "Function InitNewGame()`n`tCatchErrors(""Uncaught (InitNewGame)"")"
+    $newline = "`n"
 }
-$introBlock = $introAnchor + "`r`n`tIf SCP682_Mode Then IntroEnabled = False"
-if ($text.Contains($introAnchor)) {
-    Replace-Once $introAnchor $introBlock 'disable D-9341 intro'
-} else {
+if (-not $text.Contains($introAnchor)) {
     throw 'Could not find InitNewGame anchor'
 }
+$introBlock = $introAnchor + $newline + "`tIf SCP682_Mode Then IntroEnabled = False"
+Replace-Once $introAnchor $introBlock 'disable D-9341 intro'
 
 # Give 682 a heavier but faster locomotion baseline while preserving CB collision,
 # footsteps, gravity and camera handling.
