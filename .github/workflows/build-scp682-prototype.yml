@@ -45,9 +45,6 @@ jobs:
           $blitzRoot = Split-Path $binDir -Parent
           $userlibs = Join-Path $blitzRoot 'userlibs'
           New-Item -ItemType Directory -Path $userlibs -Force | Out-Null
-
-          # This is the setup documented by SCP:CB's Instructions.txt: use the
-          # repository mavless Bin and place the project's decls/DLLs in userlibs.
           Get-ChildItem -Path . -File -Filter '*.decls' | Copy-Item -Destination $userlibs -Force
           Get-ChildItem -Path . -File -Filter '*.dll'   | Copy-Item -Destination $userlibs -Force
 
@@ -60,6 +57,14 @@ jobs:
           Write-Host "Compiler: $($ccFile.FullName)"
           Get-ChildItem $binDir | Select-Object Name,Length | Format-Table
 
+          $dump = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC' -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'Hostx64\\x64\\dumpbin.exe$' } | Select-Object -First 1
+          if ($dump) {
+            Write-Host '--- runtime.dll dependencies ---'
+            & $dump.FullName /dependents (Join-Path $binDir 'runtime.dll')
+            Write-Host '--- linker.dll dependencies ---'
+            & $dump.FullName /dependents (Join-Path $binDir 'linker.dll')
+          }
+
       - name: Compile executable
         shell: powershell
         run: |
@@ -68,9 +73,6 @@ jobs:
           $repoRoot = $PWD.Path
           $output = Join-Path $repoRoot 'SCP-682 Containment Breach Prototype.exe'
           $source = Join-Path $repoRoot 'Main.bb'
-
-          # The historical linker looks for runtime.dll/linker.dll relative to its
-          # working directory, so compile from the mavless Bin directory.
           Push-Location $env:BLITZBIN
           try {
             & $env:BLITZCC +q -o $output $source
@@ -106,7 +108,6 @@ jobs:
           Copy-Item 'SFX' $stage -Recurse -Force
           Copy-Item 'Loadingscreens' $stage -Recurse -Force
 
-          # Force the process working directory to the extracted game folder.
           @'
           @echo off
           cd /d "%~dp0"
@@ -155,9 +156,7 @@ jobs:
             $p = Join-Path $stage $rel
             if (-not (Test-Path $p)) { throw "Portable build is missing critical runtime file: $rel" }
           }
-
           Write-Host 'Portable runtime validation passed.'
-          Get-ChildItem $stage | Select-Object Name,Length | Format-Table
 
       - name: Upload executable only
         uses: actions/upload-artifact@v4
