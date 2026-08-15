@@ -17,6 +17,18 @@ function Replace-Once([string]$needle, [string]$replacement, [string]$descriptio
     [System.IO.File]::WriteAllText($mainPath, $text, [System.Text.Encoding]::Default)
 }
 
+function Replace-FileOnce([string]$relativePath, [string]$needle, [string]$replacement, [string]$description) {
+    $path = Join-Path $PSScriptRoot ('..\' + $relativePath)
+    $path = [System.IO.Path]::GetFullPath($path)
+    $text = [System.IO.File]::ReadAllText($path)
+    $count = ([regex]::Matches($text, [regex]::Escape($needle))).Count
+    if ($count -ne 1) {
+        throw "Expected exactly one match for $description in $relativePath, found $count"
+    }
+    $text = $text.Replace($needle, $replacement)
+    [System.IO.File]::WriteAllText($path, $text, [System.Text.Encoding]::Default)
+}
+
 # The current open-source Blitz3D runtime does not expose several helpers used by
 # CB's historical mavless build. Define the compatibility layer before MapSystem.
 $mapAnchor = 'Include "MapSystem.bb"'
@@ -79,4 +91,63 @@ $titleAnchor = 'AppTitle "SCP - Containment Breach v"+VersionNumber'
 $titleBlock = 'AppTitle "SCP-682 // Containment Breach Prototype - CB "+VersionNumber'
 Replace-Once $titleAnchor $titleBlock 'prototype app title'
 
-Write-Host 'Applied SCP-682 source integration patch.'
+# QA BUILD: lock map generation to one known seed. This deliberately makes the test
+# layout reproducible while leaving the stock source behavior untouched outside CI.
+$seedClickAnchor = "`t`t`t`t`ttxt = `"NEW GAME`"`r`n`t`t`t`t`tRandomSeed = `"`""
+$seedClickBlock = "`t`t`t`t`ttxt = `"NEW GAME`"`r`n`t`t`t`t`tRandomSeed = `"682TEST`""
+if (-not ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\Menu.bb')).Contains($seedClickAnchor))) {
+    $seedClickAnchor = "`t`t`t`t`ttxt = `"NEW GAME`"`n`t`t`t`t`tRandomSeed = `"`""
+    $seedClickBlock = "`t`t`t`t`ttxt = `"NEW GAME`"`n`t`t`t`t`tRandomSeed = `"682TEST`""
+}
+Replace-FileOnce 'Menu.bb' $seedClickAnchor $seedClickBlock 'default fixed QA seed'
+
+$seedInputAnchor = 'RandomSeed = Left(InputBox(x+150*MenuScale, y+55*MenuScale, 200*MenuScale, 30*MenuScale, RandomSeed, 3),15)'
+$seedInputBlock = 'RandomSeed = Left(InputBox(x+150*MenuScale, y+55*MenuScale, 200*MenuScale, 30*MenuScale, RandomSeed, 3),15) : RandomSeed = "682TEST"'
+Replace-FileOnce 'Menu.bb' $seedInputAnchor $seedInputBlock 'lock visible map-seed input'
+
+$seedStartAnchor = @"
+`t`t`t`t`tIf RandomSeed = "" Then
+`t`t`t`t`t`tRandomSeed = Abs(MilliSecs())
+`t`t`t`t`tEndIf
+`t`t`t`t`t
+`t`t`t`t`tSeedRnd GenerateSeedNumber(RandomSeed)
+"@
+$seedStartBlock = @"
+`t`t`t`t`t; SCP-682 QA build: force the same map seed on every new test run.
+`t`t`t`t`tRandomSeed = "682TEST"
+`t`t`t`t`tSeedRnd GenerateSeedNumber(RandomSeed)
+"@
+Replace-FileOnce 'Menu.bb' $seedStartAnchor $seedStartBlock 'force fixed QA seed at START'
+
+# SCP-682 does not need SCP-106's pocket dimension as a progression detour. Omit the
+# out-of-map pocket-dimension room from generated worlds entirely.
+$pocketRoomAnchor = @"
+`tr = CreateRoom(0, ROOM1, (MapWidth-1) * 8, 0, (MapHeight-1) * 8, "pocketdimension")
+`tMapRoomID(ROOM1)=MapRoomID(ROOM1)+1`t
+"@
+$pocketRoomBlock = @"
+`t; SCP-682 QA build: SCP-106's pocket dimension is intentionally not generated.
+"@
+Replace-FileOnce 'MapSystem.bb' $pocketRoomAnchor $pocketRoomBlock 'omit pocket-dimension room'
+
+# Disable every legacy capture route into the pocket dimension. Keep the stock body
+# available under a renamed function for source comparison, but no gameplay path calls it.
+$pocketFunctionAnchor = @"
+Function MoveToPocketDimension()
+`tLocal r.Rooms
+"@
+$pocketFunctionBlock = @"
+Function MoveToPocketDimension()
+`t; SCP-682 cannot be progression-gated by SCP-106's pocket dimension.
+`tFallTimer = 0
+`tBlurTimer = 0
+`tPlayable = True
+`tReturn
+End Function
+
+Function MoveToPocketDimension_Legacy()
+`tLocal r.Rooms
+"@
+Replace-FileOnce 'NPCs.bb' $pocketFunctionAnchor $pocketFunctionBlock 'disable SCP-106 pocket-dimension capture'
+
+Write-Host 'Applied SCP-682 source integration patch (fixed QA seed, no 106 pocket dimension).'
