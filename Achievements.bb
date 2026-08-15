@@ -132,6 +132,11 @@ Function UpdateAchievementMsg()
 	Local height% = 84*scale
 	Local x%,y%
 	
+	; SCP-682 POC hook. This function is called once per gameplay frame after
+	; RenderWorld2(), making it a minimally invasive place to run the prototype
+	; layer and draw its HUD without replacing the original CB renderer.
+	UpdateSCP682Player()
+	
 	For amsg = Each AchievementMsg
 		If amsg\msgtime <> 0
 			x=GraphicWidth+amsg\msgx
@@ -173,6 +178,10 @@ Function UpdateAchievementMsg()
 	
 End Function
 
+; The actual SCP-682 player layer lives in its own file. Blitz3D resolves
+; functions/types across the complete compiled source; keeping the include here
+; avoids replacing Main.bb and leaves the original CB game loop/assets intact.
+Include "SCP682Player.bb"
 
 
 
