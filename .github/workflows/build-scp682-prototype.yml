@@ -1,0 +1,134 @@
+name: Build SCP-682 Prototype
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - prototype/scp-682-player
+    paths:
+      - '**.bb'
+      - '**.decls'
+      - '**.dll'
+      - 'mavless_bin.zip'
+      - 'tools/patch_682_source.ps1'
+      - '.github/workflows/build-scp682-prototype.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+
+      - name: Apply SCP-682 integration patch
+        shell: powershell
+        run: |
+          ./tools/patch_682_source.ps1
+
+      - name: Prepare Containment Breach Blitz3D toolchain
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tool = Join-Path $env:RUNNER_TEMP 'scpcb-blitz3d'
+          New-Item -ItemType Directory -Path $tool -Force | Out-Null
+          Expand-Archive -Path './mavless_bin.zip' -DestinationPath $tool -Force
+
+          $cc = Get-ChildItem -Path $tool -Recurse -Filter 'blitzcc.exe' | Select-Object -First 1
+          if (-not $cc) { throw 'mavless_bin.zip did not contain blitzcc.exe' }
+
+          $binDir = $cc.Directory.FullName
+          $blitzRoot = Split-Path $binDir -Parent
+          $userlibs = Join-Path $blitzRoot 'userlibs'
+          New-Item -ItemType Directory -Path $userlibs -Force | Out-Null
+
+          Get-ChildItem -Path . -File -Filter '*.decls' | Copy-Item -Destination $userlibs -Force
+          Get-ChildItem -Path . -File -Filter '*.dll'   | Copy-Item -Destination $userlibs -Force
+
+          "BLITZCC=$($cc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BLITZPATH=$blitzRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          Write-Host "blitzcc: $($cc.FullName)"
+          Write-Host "blitzpath: $blitzRoot"
+          Get-ChildItem -Path $binDir | Format-Table Name,Length
+
+      - name: Compiler version
+        shell: powershell
+        run: |
+          $env:blitzpath = $env:BLITZPATH
+          & $env:BLITZCC -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Compile executable
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:blitzpath = $env:BLITZPATH
+          $output = Join-Path $PWD 'SCP-682 Containment Breach Prototype.exe'
+          & $env:BLITZCC +q -o $output (Join-Path $PWD 'Main.bb')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path $output)) { throw 'Compiler returned success but no executable was produced.' }
+          Get-Item $output | Format-List Name,Length,LastWriteTime
+
+      - name: Assemble playable directory
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $PWD 'dist\SCP682_CB_Prototype'
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
+          Copy-Item 'SCP-682 Containment Breach Prototype.exe' $stage -Force
+          Copy-Item 'options.ini' $stage -Force
+          Copy-Item 'ReadMe.txt' $stage -Force
+          Copy-Item 'Credits.txt' $stage -Force
+          if (Test-Path 'Changelog.txt') { Copy-Item 'Changelog.txt' $stage -Force }
+          if (Test-Path 'LICENSE') { Copy-Item 'LICENSE' $stage -Force }
+          if (Test-Path 'LICENSE.txt') { Copy-Item 'LICENSE.txt' $stage -Force }
+          Copy-Item '*.dll' $stage -Force
+
+          Copy-Item 'Data' $stage -Recurse -Force
+          Copy-Item 'GFX' $stage -Recurse -Force
+          Copy-Item 'SFX' $stage -Recurse -Force
+          Copy-Item 'Loadingscreens' $stage -Recurse -Force
+
+          @'
+          SCP-682 // CONTAINMENT BREACH PROTOTYPE
+
+          This is an experimental source modification of SCP: Containment Breach.
+          It uses the original game's rooms, assets, map/event systems, NPCs, audio,
+          collision and rendering. The current 682 implementation is a gameplay POC;
+          a final rigged first-person character model is not included yet.
+
+          CONTROLS
+          LMB  Slash
+          RMB  Maul
+          R    Charge
+          Q    Body Slam
+          F    Roar
+          C    Adaptive Rage
+          E    Interact with doors
+          WASD Move
+          Shift Sprint
+
+          This derivative remains subject to the original project's CC BY-SA 3.0
+          licensing/attribution requirements. See ReadMe.txt and Credits.txt.
+          '@ | Set-Content -Path (Join-Path $stage 'SCP682_README.txt')
+
+          Get-ChildItem $stage | Select-Object Name,Length
+
+      - name: Upload executable only
+        uses: actions/upload-artifact@v4
+        with:
+          name: SCP682-Prototype-EXE
+          path: SCP-682 Containment Breach Prototype.exe
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload playable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SCP682-Containment-Breach-Prototype-Portable
+          path: dist/SCP682_CB_Prototype
+          if-no-files-found: error
+          compression-level: 6
