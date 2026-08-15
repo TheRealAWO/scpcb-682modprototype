@@ -9,13 +9,14 @@ on:
       - '**.bb'
       - '**.decls'
       - '**.dll'
+      - 'mavless_bin.zip'
       - 'tools/patch_682_source.ps1'
       - '.github/workflows/build-scp682-prototype.yml'
 
 jobs:
   build:
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - name: Checkout fork
@@ -26,49 +27,37 @@ jobs:
         run: |
           ./tools/patch_682_source.ps1
 
-      - name: Cache open-source Blitz3D toolchain
-        id: cache-blitz
-        uses: actions/cache@v4
-        with:
-          path: D:\a\_temp\blitz3d_toolchain
-          key: blitz3d-soloud-win32-v11-19-20260815
-          save-always: true
-
-      - name: Prepare current open-source Blitz3D compiler
+      - name: Prepare Containment Breach mavless Blitz3D compiler
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $tool = 'D:\a\_temp\blitz3d_toolchain'
-          $blitzRoot = Join-Path $tool 'BLITZ3D_INSTALL'
-          $cc = Join-Path $blitzRoot 'bin\blitzcc.exe'
+          if (-not (Test-Path 'mavless_bin.zip')) { throw 'Repository mavless_bin.zip is missing.' }
 
-          if (-not (Test-Path $cc)) {
-            $src = Join-Path $env:RUNNER_TEMP 'blitz3d_soloud_src'
-            $build = Join-Path $src 'cmake-build-release'
-            if (Test-Path $src) { Remove-Item $src -Recurse -Force }
-            if (Test-Path $tool) { Remove-Item $tool -Recurse -Force }
+          $tool = Join-Path $env:RUNNER_TEMP 'cb_mavless_blitz3d'
+          if (Test-Path $tool) { Remove-Item $tool -Recurse -Force }
+          New-Item -ItemType Directory -Path $tool -Force | Out-Null
+          Expand-Archive -Path 'mavless_bin.zip' -DestinationPath $tool -Force
 
-            git clone --depth 1 https://github.com/blitz-research/blitz3d_soloud.git $src
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            cmake -S $src -B $build -A Win32 -G "Visual Studio 17 2022"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            cmake --build $build --config Release --parallel 2
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ccFile = Get-ChildItem -Path $tool -Recurse -File -Filter 'blitzcc.exe' | Select-Object -First 1
+          if (-not $ccFile) { throw 'mavless_bin.zip did not contain blitzcc.exe.' }
 
-            New-Item -ItemType Directory -Path $tool -Force | Out-Null
-            Copy-Item (Join-Path $src 'BLITZ3D_INSTALL') $tool -Recurse -Force
-          }
-
+          $binDir = $ccFile.Directory.FullName
+          $blitzRoot = Split-Path $binDir -Parent
           $userlibs = Join-Path $blitzRoot 'userlibs'
           New-Item -ItemType Directory -Path $userlibs -Force | Out-Null
+
+          # This is the setup documented by SCP:CB's Instructions.txt: use the
+          # repository mavless Bin and place the project's decls/DLLs in userlibs.
           Get-ChildItem -Path . -File -Filter '*.decls' | Copy-Item -Destination $userlibs -Force
           Get-ChildItem -Path . -File -Filter '*.dll'   | Copy-Item -Destination $userlibs -Force
 
           $env:blitzpath = $blitzRoot
-          "BLITZCC=$cc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BLITZCC=$($ccFile.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BLITZPATH=$blitzRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          & $cc -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Write-Host "Blitz root: $blitzRoot"
+          Write-Host "Compiler: $($ccFile.FullName)"
+          Get-ChildItem $binDir | Select-Object Name,Length | Format-Table
 
       - name: Compile executable
         shell: powershell
@@ -82,16 +71,19 @@ jobs:
           Get-Item $output | Format-List Name,Length,LastWriteTime
           Get-FileHash -Path $output -Algorithm SHA256 | Format-List
 
-      - name: Assemble playable directory
+      - name: Assemble and validate portable directory
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $stage = Join-Path $PWD 'dist\SCP682_CB_Prototype'
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
           Copy-Item 'SCP-682 Containment Breach Prototype.exe' $stage -Force
           Copy-Item 'options.ini' $stage -Force
           Copy-Item 'ReadMe.txt' $stage -Force
           Copy-Item 'Credits.txt' $stage -Force
+          if (Test-Path 'Instructions.txt') { Copy-Item 'Instructions.txt' $stage -Force }
           if (Test-Path 'Changelog.txt') { Copy-Item 'Changelog.txt' $stage -Force }
           if (Test-Path 'LICENSE') { Copy-Item 'LICENSE' $stage -Force }
           if (Test-Path 'LICENSE.txt') { Copy-Item 'LICENSE.txt' $stage -Force }
@@ -101,13 +93,22 @@ jobs:
           Copy-Item 'SFX' $stage -Recurse -Force
           Copy-Item 'Loadingscreens' $stage -Recurse -Force
 
+          # Force the process working directory to the extracted game folder.
+          # This avoids false "GFX/image missing" failures from shortcuts or launchers
+          # whose Start In directory points somewhere else.
+          @'
+          @echo off
+          cd /d "%~dp0"
+          start "" "SCP-682 Containment Breach Prototype.exe"
+          '@ | Set-Content -Path (Join-Path $stage 'RUN_SCP682.cmd') -Encoding ascii
+
           @'
           SCP-682 // CONTAINMENT BREACH PROTOTYPE
 
-          Experimental source modification of SCP: Containment Breach using the
-          original game's rooms, assets, map/event systems, NPCs, audio, collision
-          and rendering. The 682 implementation is currently a gameplay proof of
-          concept; a final rigged first-person character model is not included yet.
+          IMPORTANT: extract the whole ZIP before launching. Do not run the EXE from
+          inside the ZIP archive and do not move the EXE away from Data/GFX/SFX.
+
+          Recommended launch: RUN_SCP682.cmd
 
           CONTROLS
           LMB  Slash
@@ -120,14 +121,37 @@ jobs:
           WASD Move
           Shift Sprint
 
-          This derivative remains subject to the original project's CC BY-SA 3.0
+          This build uses SCP: Containment Breach's repository-provided mavless
+          Blitz3D compiler/runtime target rather than the newer SoLoud fork.
+          The derivative remains subject to the original project's CC BY-SA 3.0
           licensing/attribution requirements. See ReadMe.txt and Credits.txt.
           '@ | Set-Content -Path (Join-Path $stage 'SCP682_README.txt')
+
+          $critical = @(
+            'SCP-682 Containment Breach Prototype.exe',
+            'fmod.dll',
+            'zlibwapi.dll',
+            'options.ini',
+            'GFX\cursor.png',
+            'GFX\menu\startup_TSS.avi',
+            'GFX\menu\startup_Undertow.avi',
+            'Loadingscreens\loadingback.jpg',
+            'Loadingscreens\loadingscreens.ini',
+            'Data\rooms.ini',
+            'Data\NPCs.ini'
+          )
+          foreach ($rel in $critical) {
+            $p = Join-Path $stage $rel
+            if (-not (Test-Path $p)) { throw "Portable build is missing critical runtime file: $rel" }
+          }
+
+          Write-Host 'Portable runtime validation passed.'
+          Get-ChildItem $stage | Select-Object Name,Length | Format-Table
 
       - name: Upload executable only
         uses: actions/upload-artifact@v4
         with:
-          name: SCP682-Prototype-EXE
+          name: SCP682-Prototype-Mavless-EXE
           path: SCP-682 Containment Breach Prototype.exe
           if-no-files-found: error
           compression-level: 0
@@ -135,7 +159,7 @@ jobs:
       - name: Upload playable build
         uses: actions/upload-artifact@v4
         with:
-          name: SCP682-Containment-Breach-Prototype-Portable
+          name: SCP682-Containment-Breach-Prototype-Mavless-Portable
           path: dist/SCP682_CB_Prototype
           if-no-files-found: error
           compression-level: 6
