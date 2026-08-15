@@ -54,6 +54,7 @@ jobs:
           $env:blitzpath = $blitzRoot
           "BLITZCC=$($ccFile.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BLITZPATH=$blitzRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BLITZBIN=$binDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
           Write-Host "Blitz root: $blitzRoot"
           Write-Host "Compiler: $($ccFile.FullName)"
@@ -64,9 +65,21 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $env:blitzpath = $env:BLITZPATH
-          $output = Join-Path $PWD 'SCP-682 Containment Breach Prototype.exe'
-          & $env:BLITZCC +q -o $output (Join-Path $PWD 'Main.bb')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $repoRoot = $PWD.Path
+          $output = Join-Path $repoRoot 'SCP-682 Containment Breach Prototype.exe'
+          $source = Join-Path $repoRoot 'Main.bb'
+
+          # The historical linker looks for runtime.dll/linker.dll relative to its
+          # working directory, so compile from the mavless Bin directory.
+          Push-Location $env:BLITZBIN
+          try {
+            & $env:BLITZCC +q -o $output $source
+            $code = $LASTEXITCODE
+          }
+          finally {
+            Pop-Location
+          }
+          if ($code -ne 0) { exit $code }
           if (-not (Test-Path $output)) { throw 'Compiler returned success but no executable was produced.' }
           Get-Item $output | Format-List Name,Length,LastWriteTime
           Get-FileHash -Path $output -Algorithm SHA256 | Format-List
@@ -94,8 +107,6 @@ jobs:
           Copy-Item 'Loadingscreens' $stage -Recurse -Force
 
           # Force the process working directory to the extracted game folder.
-          # This avoids false "GFX/image missing" failures from shortcuts or launchers
-          # whose Start In directory points somewhere else.
           @'
           @echo off
           cd /d "%~dp0"
