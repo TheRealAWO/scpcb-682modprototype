@@ -14,7 +14,6 @@ on:
 
 jobs:
   build:
-    # Blitz Research documents Visual Studio 2022 for the current open-source tree.
     runs-on: windows-2022
     timeout-minutes: 45
 
@@ -27,50 +26,47 @@ jobs:
         run: |
           ./tools/patch_682_source.ps1
 
-      - name: Build current open-source Blitz3D compiler
+      - name: Cache open-source Blitz3D toolchain
+        id: cache-blitz
+        uses: actions/cache@v4
+        with:
+          path: D:\a\_temp\blitz3d_toolchain
+          key: blitz3d-soloud-win32-v11-19-20260815
+
+      - name: Prepare current open-source Blitz3D compiler
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $src = Join-Path $env:RUNNER_TEMP 'blitz3d_soloud'
-          $build = Join-Path $src 'cmake-build-release'
-
-          git clone --depth 1 https://github.com/blitz-research/blitz3d_soloud.git $src
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          cmake -S $src -B $build -A Win32 -G "Visual Studio 17 2022"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          cmake --build $build --config Release --parallel 2
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $blitzRoot = Join-Path $src 'BLITZ3D_INSTALL'
+          $tool = 'D:\a\_temp\blitz3d_toolchain'
+          $blitzRoot = Join-Path $tool 'BLITZ3D_INSTALL'
           $cc = Join-Path $blitzRoot 'bin\blitzcc.exe'
+
           if (-not (Test-Path $cc)) {
-            $found = Get-ChildItem -Path $src -Recurse -Filter 'blitzcc.exe' | Select-Object -First 1
-            if (-not $found) { throw 'Open-source Blitz3D build did not produce blitzcc.exe' }
-            $cc = $found.FullName
-            $blitzRoot = Split-Path (Split-Path $cc -Parent) -Parent
+            $src = Join-Path $env:RUNNER_TEMP 'blitz3d_soloud_src'
+            $build = Join-Path $src 'cmake-build-release'
+            if (Test-Path $src) { Remove-Item $src -Recurse -Force }
+            if (Test-Path $tool) { Remove-Item $tool -Recurse -Force }
+
+            git clone --depth 1 https://github.com/blitz-research/blitz3d_soloud.git $src
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+            cmake -S $src -B $build -A Win32 -G "Visual Studio 17 2022"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cmake --build $build --config Release --parallel 2
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+            New-Item -ItemType Directory -Path $tool -Force | Out-Null
+            Copy-Item (Join-Path $src 'BLITZ3D_INSTALL') $tool -Recurse -Force
           }
 
           $userlibs = Join-Path $blitzRoot 'userlibs'
           New-Item -ItemType Directory -Path $userlibs -Force | Out-Null
-
-          # CB's external APIs are discovered by blitzcc from userlibs.
           Get-ChildItem -Path . -File -Filter '*.decls' | Copy-Item -Destination $userlibs -Force
           Get-ChildItem -Path . -File -Filter '*.dll'   | Copy-Item -Destination $userlibs -Force
 
           "BLITZCC=$cc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BLITZPATH=$blitzRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          Write-Host "blitzcc: $cc"
-          Write-Host "blitzpath: $blitzRoot"
-          Get-ChildItem (Join-Path $blitzRoot 'bin') | Format-Table Name,Length
-
-      - name: Compiler version
-        shell: powershell
-        run: |
-          $env:blitzpath = $env:BLITZPATH
-          & $env:BLITZCC -v
+          & $cc -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Compile executable
@@ -83,6 +79,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path $output)) { throw 'Compiler returned success but no executable was produced.' }
           Get-Item $output | Format-List Name,Length,LastWriteTime
+          Get-FileHash -Path $output -Algorithm SHA256 | Format-List
 
       - name: Assemble playable directory
         shell: powershell
@@ -108,10 +105,10 @@ jobs:
           @'
           SCP-682 // CONTAINMENT BREACH PROTOTYPE
 
-          This is an experimental source modification of SCP: Containment Breach.
-          It uses the original game's rooms, assets, map/event systems, NPCs, audio,
-          collision and rendering. The current 682 implementation is a gameplay POC;
-          a final rigged first-person character model is not included yet.
+          Experimental source modification of SCP: Containment Breach using the
+          original game's rooms, assets, map/event systems, NPCs, audio, collision
+          and rendering. The 682 implementation is currently a gameplay proof of
+          concept; a final rigged first-person character model is not included yet.
 
           CONTROLS
           LMB  Slash
@@ -127,8 +124,6 @@ jobs:
           This derivative remains subject to the original project's CC BY-SA 3.0
           licensing/attribution requirements. See ReadMe.txt and Credits.txt.
           '@ | Set-Content -Path (Join-Path $stage 'SCP682_README.txt')
-
-          Get-ChildItem $stage | Select-Object Name,Length
 
       - name: Upload executable only
         uses: actions/upload-artifact@v4
