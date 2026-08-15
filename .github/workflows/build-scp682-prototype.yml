@@ -64,6 +64,7 @@ jobs:
           Get-ChildItem -Path . -File -Filter '*.decls' | Copy-Item -Destination $userlibs -Force
           Get-ChildItem -Path . -File -Filter '*.dll'   | Copy-Item -Destination $userlibs -Force
 
+          $env:blitzpath = $blitzRoot
           "BLITZCC=$cc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BLITZPATH=$blitzRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           & $cc -v
