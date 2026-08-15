@@ -9,14 +9,13 @@ on:
       - '**.bb'
       - '**.decls'
       - '**.dll'
-      - 'mavless_bin.zip'
       - 'tools/patch_682_source.ps1'
       - '.github/workflows/build-scp682-prototype.yml'
 
 jobs:
   build:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout fork
@@ -27,66 +26,63 @@ jobs:
         run: |
           ./tools/patch_682_source.ps1
 
-      - name: Prepare Containment Breach mavless Blitz3D compiler
+      - name: Cache open-source Blitz3D toolchain
+        id: cache-blitz
+        uses: actions/cache@v4
+        with:
+          path: D:\a\_temp\blitz3d_toolchain
+          key: blitz3d-soloud-win32-v11-19-20260815
+          save-always: true
+
+      - name: Prepare current open-source Blitz3D compiler
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          if (-not (Test-Path 'mavless_bin.zip')) { throw 'Repository mavless_bin.zip is missing.' }
+          $tool = 'D:\a\_temp\blitz3d_toolchain'
+          $blitzRoot = Join-Path $tool 'BLITZ3D_INSTALL'
+          $cc = Join-Path $blitzRoot 'bin\blitzcc.exe'
 
-          $tool = Join-Path $env:RUNNER_TEMP 'cb_mavless_blitz3d'
-          if (Test-Path $tool) { Remove-Item $tool -Recurse -Force }
-          New-Item -ItemType Directory -Path $tool -Force | Out-Null
-          Expand-Archive -Path 'mavless_bin.zip' -DestinationPath $tool -Force
+          if (-not (Test-Path $cc)) {
+            $src = Join-Path $env:RUNNER_TEMP 'blitz3d_soloud_src'
+            $build = Join-Path $src 'cmake-build-release'
+            if (Test-Path $src) { Remove-Item $src -Recurse -Force }
+            if (Test-Path $tool) { Remove-Item $tool -Recurse -Force }
 
-          $ccFile = Get-ChildItem -Path $tool -Recurse -File -Filter 'blitzcc.exe' | Select-Object -First 1
-          if (-not $ccFile) { throw 'mavless_bin.zip did not contain blitzcc.exe.' }
+            git clone --depth 1 https://github.com/blitz-research/blitz3d_soloud.git $src
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cmake -S $src -B $build -A Win32 -G "Visual Studio 17 2022"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cmake --build $build --config Release --parallel 2
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-          $binDir = $ccFile.Directory.FullName
-          $blitzRoot = Split-Path $binDir -Parent
+            New-Item -ItemType Directory -Path $tool -Force | Out-Null
+            Copy-Item (Join-Path $src 'BLITZ3D_INSTALL') $tool -Recurse -Force
+          }
+
           $userlibs = Join-Path $blitzRoot 'userlibs'
           New-Item -ItemType Directory -Path $userlibs -Force | Out-Null
           Get-ChildItem -Path . -File -Filter '*.decls' | Copy-Item -Destination $userlibs -Force
           Get-ChildItem -Path . -File -Filter '*.dll'   | Copy-Item -Destination $userlibs -Force
 
           $env:blitzpath = $blitzRoot
-          "BLITZCC=$($ccFile.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BLITZCC=$cc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "BLITZPATH=$blitzRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "BLITZBIN=$binDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          Write-Host "Blitz root: $blitzRoot"
-          Write-Host "Compiler: $($ccFile.FullName)"
-          Get-ChildItem $binDir | Select-Object Name,Length | Format-Table
-
-          $dump = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\MSVC' -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'Hostx64\\x64\\dumpbin.exe$' } | Select-Object -First 1
-          if ($dump) {
-            Write-Host '--- runtime.dll dependencies ---'
-            & $dump.FullName /dependents (Join-Path $binDir 'runtime.dll')
-            Write-Host '--- linker.dll dependencies ---'
-            & $dump.FullName /dependents (Join-Path $binDir 'linker.dll')
-          }
+          & $cc -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Compile executable
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $env:blitzpath = $env:BLITZPATH
-          $repoRoot = $PWD.Path
-          $output = Join-Path $repoRoot 'SCP-682 Containment Breach Prototype.exe'
-          $source = Join-Path $repoRoot 'Main.bb'
-          Push-Location $env:BLITZBIN
-          try {
-            & $env:BLITZCC +q -o $output $source
-            $code = $LASTEXITCODE
-          }
-          finally {
-            Pop-Location
-          }
-          if ($code -ne 0) { exit $code }
+          $output = Join-Path $PWD 'SCP-682 Containment Breach Prototype.exe'
+          & $env:BLITZCC +q -o $output (Join-Path $PWD 'Main.bb')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path $output)) { throw 'Compiler returned success but no executable was produced.' }
           Get-Item $output | Format-List Name,Length,LastWriteTime
           Get-FileHash -Path $output -Algorithm SHA256 | Format-List
 
-      - name: Assemble and validate portable directory
+      - name: Assemble guarded portable directory
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -98,7 +94,6 @@ jobs:
           Copy-Item 'options.ini' $stage -Force
           Copy-Item 'ReadMe.txt' $stage -Force
           Copy-Item 'Credits.txt' $stage -Force
-          if (Test-Path 'Instructions.txt') { Copy-Item 'Instructions.txt' $stage -Force }
           if (Test-Path 'Changelog.txt') { Copy-Item 'Changelog.txt' $stage -Force }
           if (Test-Path 'LICENSE') { Copy-Item 'LICENSE' $stage -Force }
           if (Test-Path 'LICENSE.txt') { Copy-Item 'LICENSE.txt' $stage -Force }
@@ -108,68 +103,116 @@ jobs:
           Copy-Item 'SFX' $stage -Recurse -Force
           Copy-Item 'Loadingscreens' $stage -Recurse -Force
 
+          # Preserve stock settings and ship a conservative first-boot profile.
+          Copy-Item (Join-Path $stage 'options.ini') (Join-Path $stage 'options_original.ini') -Force
+          $safe = Get-Content (Join-Path $stage 'options.ini') -Raw
+          $safe = $safe -replace 'width = 1280','width = 1024'
+          $safe = $safe -replace 'height = 720','height = 768'
+          $safe = $safe -replace 'gfx driver = 2','gfx driver = 1'
+          $safe = $safe -replace 'bump mapping enabled = 1','bump mapping enabled = 0'
+          $safe = $safe -replace 'antialias = 1','antialias = 0'
+          $safe = $safe -replace 'check for updates = true','check for updates = false'
+          $safe = $safe -replace 'play startup video = true','play startup video = false'
+          $safe = $safe -replace 'launcher enabled = true','launcher enabled = false'
+          Set-Content (Join-Path $stage 'options_safe.ini') $safe -Encoding ascii
+          Set-Content (Join-Path $stage 'options.ini') $safe -Encoding ascii
+
+          # CB resolves media with relative paths. This launcher guarantees that the
+          # process current directory is the extracted game directory and refuses to
+          # start if the critical media/runtime layout is incomplete.
           @'
           @echo off
+          setlocal EnableExtensions
           cd /d "%~dp0"
-          start "" "SCP-682 Containment Breach Prototype.exe"
+          title SCP-682 Containment Breach Prototype - Launch Guard
+          echo Working directory: %CD%
+          set "BAD=0"
+          call :check "SCP-682 Containment Breach Prototype.exe"
+          call :check "options.ini"
+          call :check "GFX\cursor.PNG"
+          call :check "GFX\menu\menuwhite.jpg"
+          call :check "Loadingscreens\loadingback.jpg"
+          call :check "Loadingscreens\loadingscreens.ini"
+          call :check "Data\rooms.ini"
+          call :check "Data\NPCs.ini"
+          call :check "fmod.dll"
+          call :check "zlibwapi.dll"
+          if not "%BAD%"=="0" (
+            echo.
+            echo Required files are absent. Extract the ENTIRE ZIP before running.
+            pause
+            exit /b 2
+          )
+          echo.
+          echo Runtime layout OK. Launching...
+          "SCP-682 Containment Breach Prototype.exe"
+          set "GAME_EXIT=%ERRORLEVEL%"
+          echo.
+          echo Game process ended with exit code %GAME_EXIT%.
+          echo If a popup reports Image "GFX\..." missing, copy that entire quoted path.
+          pause
+          exit /b %GAME_EXIT%
+          :check
+          if exist %1 (echo [ OK ] %~1) else (echo [MISS] %~1&set "BAD=1")
+          exit /b
           '@ | Set-Content -Path (Join-Path $stage 'RUN_SCP682.cmd') -Encoding ascii
 
           @'
+          @echo off
+          setlocal EnableExtensions
+          cd /d "%~dp0"
+          copy /y "options_safe.ini" "options.ini" >nul
+          call "RUN_SCP682.cmd"
+          exit /b %ERRORLEVEL%
+          '@ | Set-Content -Path (Join-Path $stage 'RUN_SCP682_SAFE_MODE.cmd') -Encoding ascii
+
+          @'
           SCP-682 // CONTAINMENT BREACH PROTOTYPE
+          GUARDED FIRST-BOOT BUILD
 
-          IMPORTANT: extract the whole ZIP before launching. Do not run the EXE from
-          inside the ZIP archive and do not move the EXE away from Data/GFX/SFX.
+          Extract the ENTIRE artifact before launching. Do not run the EXE from
+          inside a ZIP and do not move it away from the GFX/Data/SFX folders.
 
-          Recommended launch: RUN_SCP682.cmd
+          First test: RUN_SCP682_SAFE_MODE.cmd
 
-          CONTROLS
-          LMB  Slash
-          RMB  Maul
-          R    Charge
-          Q    Body Slam
-          F    Roar
-          C    Adaptive Rage
-          E    Interact with doors
-          WASD Move
-          Shift Sprint
+          SCP:CB's StrictLoads layer intentionally terminates the game if a relative
+          media path cannot be found. The launch guard verifies the critical layout
+          and fixes the working directory before starting the executable.
 
-          This build uses SCP: Containment Breach's repository-provided mavless
-          Blitz3D compiler/runtime target rather than the newer SoLoud fork.
-          The derivative remains subject to the original project's CC BY-SA 3.0
-          licensing/attribution requirements. See ReadMe.txt and Credits.txt.
-          '@ | Set-Content -Path (Join-Path $stage 'SCP682_README.txt')
+          If a missing-image popup still appears, report the complete quoted GFX path.
+          '@ | Set-Content -Path (Join-Path $stage 'FIRST_RUN_README.txt') -Encoding ascii
 
           $critical = @(
             'SCP-682 Containment Breach Prototype.exe',
             'fmod.dll',
             'zlibwapi.dll',
             'options.ini',
-            'GFX\cursor.png',
-            'GFX\menu\startup_TSS.avi',
-            'GFX\menu\startup_Undertow.avi',
+            'GFX\cursor.PNG',
+            'GFX\menu\menuwhite.jpg',
             'Loadingscreens\loadingback.jpg',
             'Loadingscreens\loadingscreens.ini',
             'Data\rooms.ini',
             'Data\NPCs.ini'
           )
           foreach ($rel in $critical) {
-            $p = Join-Path $stage $rel
-            if (-not (Test-Path $p)) { throw "Portable build is missing critical runtime file: $rel" }
+            if (-not (Test-Path (Join-Path $stage $rel))) {
+              throw "Portable build is missing critical runtime file: $rel"
+            }
           }
-          Write-Host 'Portable runtime validation passed.'
+          Write-Host 'Guarded portable runtime validation passed.'
 
       - name: Upload executable only
         uses: actions/upload-artifact@v4
         with:
-          name: SCP682-Prototype-Mavless-EXE
+          name: SCP682-Prototype-EXE
           path: SCP-682 Containment Breach Prototype.exe
           if-no-files-found: error
           compression-level: 0
 
-      - name: Upload playable build
+      - name: Upload guarded playable build
         uses: actions/upload-artifact@v4
         with:
-          name: SCP682-Containment-Breach-Prototype-Mavless-Portable
+          name: SCP682-Containment-Breach-Prototype-Guarded-Portable
           path: dist/SCP682_CB_Prototype
           if-no-files-found: error
           compression-level: 6
