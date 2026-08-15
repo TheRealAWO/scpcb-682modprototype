@@ -15,6 +15,7 @@ Const SCP682_KEY_RAGE%     = 46 ; C
 Global SCP682_Mode% = True
 Global SCP682_Initialized% = False
 Global SCP682_LastCollider% = 0
+Global SCP682_TestSeed$ = "682TEST"
 
 Global SCP682_Biomass# = 100.0
 Global SCP682_MaxBiomass# = 100.0
@@ -32,6 +33,9 @@ Global SCP682_ChargeCooldown# = 0.0
 Global SCP682_SlamCooldown# = 0.0
 Global SCP682_RoarCooldown# = 0.0
 Global SCP682_ChargeTimer# = 0.0
+
+Global SCP682_MTFInitialDeployed% = False
+Global SCP682_MTFReinforceTimer# = 0.0
 
 Global SCP682_Message$ = ""
 Global SCP682_MessageTimer# = 0.0
@@ -56,6 +60,8 @@ Function InitSCP682Player()
 	SCP682_SlamCooldown = 0.0
 	SCP682_RoarCooldown = 0.0
 	SCP682_ChargeTimer = 0.0
+	SCP682_MTFInitialDeployed = False
+	SCP682_MTFReinforceTimer = 70*24
 	
 	Injuries = 0
 	Bloodloss = 0
@@ -66,7 +72,7 @@ Function InitSCP682Player()
 	FallTimer = 0
 	Playable = True
 	
-	SCP682_Message = "SCP-682 PLAYER PROTOTYPE ACTIVE"
+	SCP682_Message = "SCP-682 PLAYER PROTOTYPE ACTIVE // QA SEED "+SCP682_TestSeed
 	SCP682_MessageTimer = 70*4
 End Function
 
@@ -139,17 +145,8 @@ Function SCP682FindTarget.NPCs(range#, cone#)
 End Function
 
 
-Function SCP682NeutralizeNPC(n.NPCs)
+Function SCP682StopNPCSounds(n.NPCs)
 	If n = Null Then Return
-	
-	n\IsDead = True
-	n\IgnorePlayer = True
-	n\Idle = True
-	n\CurrSpeed = 0
-	n\Speed = 0
-	n\Reload = 999999
-	n\PathStatus = 0
-	n\PathTimer = 999999
 	
 	If n\SoundChn <> 0 Then
 		If n\SoundChn_IsStream Then
@@ -166,7 +163,44 @@ Function SCP682NeutralizeNPC(n.NPCs)
 			If ChannelPlaying(n\SoundChn2) Then StopChannel(n\SoundChn2)
 		EndIf
 	EndIf
+End Function
+
+
+Function SCP682NeutralizeNPC(n.NPCs)
+	If n = Null Then Return
 	
+	SCP682StopNPCSounds(n)
+	
+	n\IsDead = True
+	n\IgnorePlayer = True
+	n\Idle = True
+	n\CurrSpeed = 0
+	n\Reload = 999999
+	n\PathStatus = 0
+	n\PathTimer = 999999
+	
+	; Preserve existing human death poses instead of deleting the target on contact.
+	; MTF2.b3d already has a dedicated dead frame handled by UpdateMTFUnit (532).
+	If n\NPCtype = NPCtypeMTF Then
+		EntityType n\Collider, HIT_DEAD
+		Return
+	EndIf
+	
+	; Class-D/scientist bodies already use frames 19 and 60 as corpse poses.
+	If n\NPCtype = NPCtypeD Or n\NPCtype = NPCtypeClerk Then
+		n\State = 99
+		If (n\ID Mod 2) = 0 Then
+			SetNPCFrame(n,19)
+		Else
+			SetNPCFrame(n,60)
+		EndIf
+		EntityType n\Collider, HIT_DEAD
+		Return
+	EndIf
+	
+	; Other prototype targets still use the conservative removal path until their
+	; model-specific death sequences are explicitly mapped.
+	n\Speed = 0
 	If n\obj <> 0 Then HideEntity n\obj
 	If n\obj2 <> 0 Then HideEntity n\obj2
 	If n\obj3 <> 0 Then HideEntity n\obj3
@@ -187,6 +221,13 @@ Function SCP682StaggerNPC(n.NPCs, force#)
 	n\PathStatus = 0
 	n\PathTimer = Max(n\PathTimer, 70)
 	
+	; SCP-173's scripted movement assumes its collider is not manually translated.
+	; Direct MoveEntity knockback could push the statue through room collision.
+	If n\NPCtype = NPCtype173 Then
+		n\CurrSpeed = 0
+		Return
+	EndIf
+	
 	Local pvt% = CreatePivot()
 	PositionEntity pvt, EntityX(n\Collider,True), EntityY(n\Collider,True), EntityZ(n\Collider,True), True
 	PointEntity pvt, Collider
@@ -200,6 +241,14 @@ End Function
 Function SCP682ImpactTarget(n.NPCs, force# = 0.16)
 	If n = Null Then Return
 	
+	If n\NPCtype = NPCtype173 Then
+		SCP682StaggerNPC(n,0)
+		SCP682_Rage = Min(100.0, SCP682_Rage + 4.0)
+		CameraShake = Max(CameraShake,0.8)
+		SCP682SetMessage("SCP-173 STRUCK // COLLIDER HELD")
+		Return
+	EndIf
+	
 	If SCP682CanMaulTarget(n) Then
 		SCP682NeutralizeNPC(n)
 		SCP682_Rage = Min(100.0, SCP682_Rage + 8.0)
@@ -212,6 +261,52 @@ Function SCP682ImpactTarget(n.NPCs, force# = 0.16)
 End Function
 
 
+Function SCP682FindStartEscapeDoor.Doors()
+	Local e.Events
+	For e.Events = Each Events
+		If e\EventName = "alarm" Then
+			If e\room <> Null Then
+				If e\room\RoomDoors[5] <> Null Then Return e\room\RoomDoors[5]
+			EndIf
+		EndIf
+	Next
+	Return Null
+End Function
+
+
+Function SCP682IsUnsafeStartDoor%(d.Doors)
+	If d = Null Then Return False
+	Local unsafe.Doors = SCP682FindStartEscapeDoor()
+	If unsafe = Null Then Return False
+	If d = unsafe Then Return True
+	Return False
+End Function
+
+
+Function SCP682SecureStartEscapeDoor()
+	Local e.Events
+	Local d.Doors
+	For e.Events = Each Events
+		If e\EventName = "alarm" Then
+			If e\room <> Null Then
+				d = e\room\RoomDoors[5]
+				If d <> Null Then
+					; This is the scripted NPC escape door in the breached 173 start room.
+					; It is not a valid player route in the 682 start configuration.
+					d\locked = True
+					d\KeyCard = 99
+					If e\EventState2 <> 0 Then
+						d\open = False
+						d\fastopen = False
+					EndIf
+				EndIf
+			EndIf
+			Return
+		EndIf
+	Next
+End Function
+
+
 Function SCP682BreachNearestDoor%(range#)
 	Local d.Doors
 	Local best.Doors = Null
@@ -219,10 +314,12 @@ Function SCP682BreachNearestDoor%(range#)
 	
 	For d.Doors = Each Doors
 		If d\frameobj <> 0 Then
-			dist = EntityDistance(Collider, d\frameobj)
-			If dist <= range And dist < bestDist Then
-				best = d
-				bestDist = dist
+			If Not SCP682IsUnsafeStartDoor(d) Then
+				dist = EntityDistance(Collider, d\frameobj)
+				If dist <= range And dist < bestDist Then
+					best = d
+					bestDist = dist
+				EndIf
 			EndIf
 		EndIf
 	Next
@@ -268,7 +365,157 @@ Function SCP682Interact()
 		EndIf
 	Next
 	
-	If best <> Null Then UseDoor(best)
+	If best <> Null Then
+		If SCP682IsUnsafeStartDoor(best) Then
+			SCP682SetMessage("NO ROUTE BEYOND THIS ACCESS")
+			Return
+		EndIf
+		
+		; Locked/keycard bulkheads are physical obstacles to 682, not progression locks.
+		If best\locked Or best\KeyCard <> 0 Or best\Code <> "" Then
+			SCP682BreachNearestDoor(1.45)
+		Else
+			UseDoor(best)
+		EndIf
+	EndIf
+End Function
+
+
+Function SCP682CountLivingMTF%()
+	Local n.NPCs
+	Local count% = 0
+	For n.NPCs = Each NPCs
+		If n\NPCtype = NPCtypeMTF Then
+			If Not n\IsDead Then count = count + 1
+		EndIf
+	Next
+	Return count
+End Function
+
+
+Function SCP682FindMTFSpawnRoom.Rooms(zone%, minDist#)
+	Local r.Rooms
+	Local best.Rooms = Null
+	Local dist#, bestDist# = 100000.0
+	Local roomName$
+	
+	For r.Rooms = Each Rooms
+		If r\RoomTemplate <> Null Then
+			roomName = Lower(r\RoomTemplate\Name)
+			If roomName <> "start" And roomName <> "173" And roomName <> "pocketdimension" And roomName <> "dimension1499" And roomName <> "gatea" And roomName <> "exit1" Then
+				If zone = 0 Or r\zone = zone Then
+					dist = EntityDistance(Collider,r\obj)
+					If dist >= minDist And dist < bestDist Then
+						best = r
+						bestDist = dist
+					EndIf
+				EndIf
+			EndIf
+		EndIf
+	Next
+	
+	Return best
+End Function
+
+
+Function SCP682SpawnMTFSquad(r.Rooms, amount%)
+	If r = Null Then Return
+	If amount <= 0 Then Return
+	
+	Local leader.NPCs = Null
+	Local n.NPCs
+	Local i%
+	Local xoff#, zoff#
+	
+	For i = 0 To amount-1
+		xoff = ((i Mod 2)*0.34)-0.17
+		zoff = (Int(i/2)*0.34)-0.34
+		n = CreateNPC(NPCtypeMTF, EntityX(r\obj,True)+xoff, EntityY(r\obj,True)+0.5, EntityZ(r\obj,True)+zoff)
+		If n <> Null Then
+			ResetEntity n\Collider
+			n\State = 0
+			n\PathStatus = 0
+			n\PathTimer = 0
+			n\Reload = 35+(i*4)
+			If leader = Null Then
+				leader = n
+			Else
+				n\MTFLeader = leader
+			EndIf
+		EndIf
+	Next
+End Function
+
+
+Function SCP682EnsureInitialMTFResponse()
+	If SCP682_MTFInitialDeployed Then Return
+	If PlayerRoom = Null Then Return
+	
+	Local count% = SCP682CountLivingMTF()
+	Local r.Rooms
+	Local amount%
+	Local spawned% = 0
+	
+	If count < 8 Then
+		r = SCP682FindMTFSpawnRoom(1,10.0)
+		If r <> Null Then
+			amount = Min(3,8-count)
+			SCP682SpawnMTFSquad(r,amount)
+			count = count + amount
+			spawned = spawned + amount
+		EndIf
+	EndIf
+	
+	If count < 8 Then
+		r = SCP682FindMTFSpawnRoom(2,12.0)
+		If r <> Null Then
+			amount = Min(3,8-count)
+			SCP682SpawnMTFSquad(r,amount)
+			count = count + amount
+			spawned = spawned + amount
+		EndIf
+	EndIf
+	
+	If count < 8 Then
+		r = SCP682FindMTFSpawnRoom(3,14.0)
+		If r <> Null Then
+			amount = Min(2,8-count)
+			SCP682SpawnMTFSquad(r,amount)
+			count = count + amount
+			spawned = spawned + amount
+		EndIf
+	EndIf
+	
+	SCP682_MTFInitialDeployed = True
+	If count > 0 Then MTFtimer = Max(MTFtimer,FPSfactor)
+	If spawned > 0 Then SCP682SetMessage("MTF RESPONSE TEAMS ACTIVE // "+count+" HOSTILES",70*4)
+End Function
+
+
+Function SCP682UpdateMTFReinforcements()
+	If Not SCP682_MTFInitialDeployed Then Return
+	If PlayerRoom = Null Then Return
+	
+	If SCP682_MTFReinforceTimer > 0 Then
+		SCP682_MTFReinforceTimer = Max(SCP682_MTFReinforceTimer-FPSfactor,0)
+		Return
+	EndIf
+	
+	Local count% = SCP682CountLivingMTF()
+	Local r.Rooms
+	Local amount%
+	
+	If count < 12 Then
+		r = SCP682FindMTFSpawnRoom(PlayerRoom\zone,12.0)
+		If r = Null Then r = SCP682FindMTFSpawnRoom(0,14.0)
+		If r <> Null Then
+			amount = Min(4,12-count)
+			SCP682SpawnMTFSquad(r,amount)
+			SCP682SetMessage("MTF REINFORCEMENTS DEPLOYED",70*3)
+		EndIf
+	EndIf
+	
+	SCP682_MTFReinforceTimer = 70*28
 End Function
 
 
@@ -551,7 +798,7 @@ Function DrawSCP682HUD()
 	DrawSCP682Meter(x,y+104*MenuScale,w,h,adapt,100.0,120,120,120)
 	
 	Color 210,210,210
-	AAText 20*MenuScale,GraphicHeight-(58*MenuScale),"LMB SLASH  RMB MAUL  R CHARGE  Q SLAM  F ROAR  C RAGE  E INTERACT"
+	AAText 20*MenuScale,GraphicHeight-(58*MenuScale),"QA SEED "+SCP682_TestSeed+" // LMB SLASH  RMB MAUL  R CHARGE  Q SLAM  F ROAR  C RAGE  E INTERACT"
 	
 	If SCP682_MessageTimer > 0 And SCP682_Message <> "" Then
 		Color 0,0,0
@@ -576,6 +823,10 @@ Function UpdateSCP682Player()
 	; 682 cannot permanently die. This prevents CB's Keter/permadeath path from
 	; deleting a save before the reconstitution layer can catch a lethal event.
 	If SelectedDifficulty <> Null Then SelectedDifficulty\permaDeath = False
+	
+	SCP682SecureStartEscapeDoor()
+	SCP682EnsureInitialMTFResponse()
+	SCP682UpdateMTFReinforcements()
 	
 	SCP682ConvertHumanDamage()
 	SCP682RecoverFromCBKill()
