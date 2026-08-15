@@ -17,10 +17,17 @@ function Replace-Once([string]$needle, [string]$replacement, [string]$descriptio
     [System.IO.File]::WriteAllText($mainPath, $text, [System.Text.Encoding]::Default)
 }
 
+# The current open-source Blitz3D runtime does not expose several helpers used by
+# CB's historical mavless build. Define the compatibility layer before MapSystem.
+$mapAnchor = 'Include "MapSystem.bb"'
+$mapBlock = @"
+Include "SCP682Compat.bb"
+Include "MapSystem.bb"
+"@
+Replace-Once $mapAnchor $mapBlock 'modern Blitz3D compatibility include'
+
 # Integrate the 682 player layer only after CB has declared Rooms, Doors, NPCs,
-# events, UI globals, etc. The build now uses the repository's historical
-# mavless Blitz3D bin, matching the toolchain CB documents for this source tree,
-# so the modern-runtime compatibility shim is intentionally not included.
+# events, UI globals, etc.
 $includeAnchor = "Global I_Zone.MapZones = New MapZones"
 $includeBlock = @"
 Include "SCP682Player.bb"
@@ -72,4 +79,4 @@ $titleAnchor = 'AppTitle "SCP - Containment Breach v"+VersionNumber'
 $titleBlock = 'AppTitle "SCP-682 // Containment Breach Prototype - CB "+VersionNumber'
 Replace-Once $titleAnchor $titleBlock 'prototype app title'
 
-Write-Host 'Applied SCP-682 source integration patch (mavless runtime target).'
+Write-Host 'Applied SCP-682 source integration patch.'
